@@ -114,6 +114,7 @@ class Station:
             self.thread.join()
 
     def _record_loop(self, total_duration_seconds: int) -> None:
+        # --- 1. SETUP PARAMETERS ---
         paths = self.config['paths']
         retries = self.config.get('recording_retries', 3)
         retry_delay = self.config.get('recording_retry_delay_seconds', 60)
@@ -122,62 +123,93 @@ class Station:
         output_dir = os.path.join(paths['recordings'], self.sanitized_name)
         os.makedirs(output_dir, exist_ok=True)
 
+        # --- 2. DYNAMICALLY BUILD THE FFMPEG COMMAND ---
+        ffmpeg_config = self.config.get('ffmpeg_settings', {})
+        loglevel = ffmpeg_config.get('loglevel', 'error')
+        audio_codec = ffmpeg_config.get('codec', 'copy')
+        headers_dict = ffmpeg_config.get('headers', {})
+
+        ffmpeg_headers = "".join([f"{key}: {value}\r\n" for key, value in headers_dict.items()])
         output_template = os.path.join(output_dir, f'{self.sanitized_name}_%Y-%m-%d_%H-%M-%S.aac')
-        headers = {'Referer': 'https://www.iheart.com/', 'User-Agent': 'Mozilla/5.0'}
-        ffmpeg_headers = "".join([f"{key}: {value}\r\n" for key, value in headers.items()])
 
-        command = ['ffmpeg', '-v', 'error', '-headers', ffmpeg_headers, '-i', self.stream_url, '-t', str(total_duration_seconds),
-                   '-f', 'segment', '-segment_time', str(chunk_duration), '-c:a', 'copy', '-strftime', '1', output_template]
+        # Base command
+        command = ['ffmpeg', '-v', loglevel]
 
+        # Add headers only if they are defined
+        if ffmpeg_headers:
+            command.extend(['-headers', ffmpeg_headers])
+
+        # Add the rest of the arguments
+        command.extend([
+            '-i', self.stream_url,
+            '-t', str(total_duration_seconds),
+            '-f', 'segment',
+            '-segment_time', str(chunk_duration),
+            '-c:a', audio_codec,
+            '-strftime', '1',
+            output_template
+        ])
+
+        # --- 3. MAIN RECORDING LOOP WITH RETRIES ---
         attempt = 0
         while self.is_running and attempt <= retries:
             if attempt > 0:
                 logger.warning(f"[Recorder - {self.name}] Retrying... (Attempt {attempt}/{retries}) in {retry_delay}s")
-                ### <<< FIX 3: Replace the blocking time.sleep() with an interruptible event.wait()
-                # This will wait for `retry_delay` seconds OR until `stop_event.set()` is called.
                 was_interrupted = self.stop_event.wait(timeout=retry_delay)
                 if was_interrupted:
-                    break # Exit the loop immediately if stop was called during the delay
+                    break  # Exit loop immediately if stop was called during the delay
 
             logger.info(f"[Recorder - {self.name}] Starting FFmpeg process (Attempt {attempt + 1}).")
 
             try:
-                self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
-                self.process.wait()
-                stderr_bytes = self.process.stderr.read() if self.process.stderr else b""
+                # Run the FFmpeg process
+                self.process = subprocess.Popen(
+                    command,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                )
+                # Use .communicate() to get output and wait for process to finish. Prevents deadlocks.
+                stderr_bytes, _ = self.process.communicate()
 
+                # If the pipeline was stopped while ffmpeg was running, exit the loop cleanly.
                 if not self.is_running:
                     break
 
+                # --- 4. HANDLE FFMPEG EXIT CODE ---
                 if self.process.returncode == 0:
-                    logger.info(f"[Recorder - {self.name}] Recording session finished.")
-                    return
+                    logger.info(f"[Recorder - {self.name}] Recording session finished successfully.")
+                    return # Exit the entire method on success
 
+                # If we get here, it means ffmpeg failed.
                 error_output = stderr_bytes.decode('utf-8', errors='ignore').strip()
                 error_reason = "Unknown FFmpeg error"
                 for pattern, reason in self.FFMPEG_ERROR_PATTERNS.items():
                     if pattern in error_output:
                         error_reason = reason
                         break
-
+                
                 logger.error(f"[Recorder - {self.name}] FFmpeg failed. Reason: {error_reason}")
+                logger.debug(f"[Recorder - {self.name}] Full FFmpeg stderr: {error_output}")
                 attempt += 1
 
             except Exception as e:
-                # Check if the stop event was set, which might have caused the exception (e.g., by terminating the process)
+                # Check if the exception was caused by our stop signal
                 if self.stop_event.is_set():
                     logger.info(f"[Recorder - {self.name}] Process interrupted by stop signal.")
                     break
-                logger.error(f"[Recorder - {self.name}] An unexpected error occurred: {e}", exc_info=True)
+                logger.error(f"[Recorder - {self.name}] An unexpected error occurred in the record loop: {e}", exc_info=True)
                 attempt += 1
 
+        # --- 5. HANDLE PERMANENT FAILURE ---
         if self.is_running:
             self.has_failed_permanently = True
             final_error_message = f"🛑 **Critical Recorder Failure**\n**Station:** `{self.name}`\nThe recorder has stopped after {retries + 1} failed attempts. Check logs for details."
             self.notifier.send(final_error_message)
-            logger.critical(f"[Recorder - {self.name}] All recording attempts have failed.")
+            logger.critical(f"[Recorder - {self.name}] All recording attempts have failed for station.")
         else:
-            logger.info(f"[Recorder - {self.name}] Recording loop has been stopped.")
+            logger.info(f"[Recorder - {self.name}] Recording loop has been stopped gracefully.")
 
 class AudioProcessor(FileSystemEventHandler):
     def __init__(self, model: Any, config: Dict[str, Any], notifier: DiscordBotNotifier):

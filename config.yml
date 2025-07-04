@@ -22,6 +22,16 @@ logging:
   root:
     level: INFO
     handlers: [console, file]
+
+# --- fmpeg config ---
+ffmpeg_settings:
+  loglevel: error # Verbosity level for ffmpeg (e.g., quiet, error, warning, info, debug)
+  codec: copy # Audio codec. 'copy' is efficient as it doesn't re-encode. Use 'aac' to re-encode if needed.
+  headers:
+    # Some streams require specific headers to mimic a browser.
+    Referer: https://www.iheart.com/
+    User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36
+
 # --- application config ---
 whisper_model: base
 recording_chunk_duration_seconds: 300
