@@ -8,8 +8,14 @@ import time
 from typing import Any
 from dotenv import load_dotenv
 import yaml
+import logging
+import logging.config
+import sys
 
-from src.radio_pipeline import Pipeline, DiscordBotNotifier
+from src.radio_pipeline import Pipeline, DiscordBotNotifier, load_config
+
+# --- Logging Setup ---
+logger = logging.getLogger(__name__)
 
 # --- Bot Setup ---
 load_dotenv()
@@ -39,7 +45,7 @@ async def load_bot_config():
             with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
                 return yaml.safe_load(f)
         except (FileNotFoundError, yaml.YAMLError) as e:
-            print(f"❌ Bot config loader error: {e}")
+            logger.error(f"Bot config loader error: {e}")
             return None
 
 async def save_bot_config(data):
@@ -50,7 +56,7 @@ async def save_bot_config(data):
                 yaml.dump(data, f, default_flow_style=False, sort_keys=False, indent=2)
             return True
         except IOError as e:
-            print(f"❌ Bot config save error: {e}")
+            logger.error(f"Bot config save error: {e}")
             return False
 
 # --- Helper Function ---
@@ -64,25 +70,25 @@ def format_seconds(seconds: float) -> str:
 async def preload_whisper_model():
     """Loads the Whisper model in a background thread and sets an event when done."""
     global whisper_model
-    print("--- Initiating Whisper model pre-loading... ---")
+    logger.info("--- Initiating Whisper model pre-loading... ---")
     try:
         config = await load_bot_config()
         if not config:
-            print("❌ CRITICAL: Cannot pre-load model, config file not found or invalid.")
+            logger.critical("Cannot pre-load model, config file not found or invalid.")
             return
 
         model_name = config.get('whisper_model')
         if not model_name:
-             print("❌ CRITICAL: 'whisper_model' not specified in config.yml for pre-loading.")
+             logger.critical("'whisper_model' not specified in config.yml for pre-loading.")
              return
 
         import whisper
         whisper_model = await asyncio.to_thread(whisper.load_model, model_name)
 
-        print(f"✅ Whisper model '{model_name}' pre-loaded successfully.")
+        logger.info(f"Whisper model '{model_name}' pre-loaded successfully.")
         model_ready_event.set()
     except Exception as e:
-        print(f"❌ CRITICAL: Failed to pre-load Whisper model: {e}")
+        logger.critical(f"Failed to pre-load Whisper model: {e}", exc_info=True)
 
 
 # ==============================================================================
@@ -210,7 +216,7 @@ bot.help_command = CustomHelpCommand()
 # --- Bot Events ---
 @bot.event
 async def on_ready():
-    print(f'✅ Bot logged in as {bot.user}')
+    logger.info(f'Bot logged in as {bot.user}')
     if CHANNEL_ID:
         channel = bot.get_channel(CHANNEL_ID)
         if channel:
@@ -218,9 +224,9 @@ async def on_ready():
             await channel.send("📻 Radio Pipeline Bot is online. Use `!help` for commands.")
             asyncio.create_task(preload_whisper_model())
         else:
-            print(f"❌ CRITICAL: Could not find channel with ID {CHANNEL_ID}.")
+            logger.critical(f"Could not find channel with ID {CHANNEL_ID}.")
     else:
-        print("❌ CRITICAL: DISCORD_COMMAND_CHANNEL_ID is not set in the .env file.")
+        logger.critical("DISCORD_COMMAND_CHANNEL_ID is not set in the .env file.")
 
 # ==============================================================================
 # SECTION: BOT COMMANDS
@@ -255,7 +261,8 @@ async def start_pipeline(ctx, duration_minutes: int = 0):
             await ctx.message.remove_reaction("⏳", bot.user)
         except asyncio.TimeoutError:
             await ctx.message.remove_reaction("⏳", bot.user)
-            await ctx.send("❌ **Start Failed:** The AI model took too long to load or failed. Please check the console logs and try restarting the bot.")
+            await ctx.send("❌ **Start Failed:** The AI model took too long to load or failed. Please check the logs and try restarting the bot.")
+            logger.error("Timeout waiting for Whisper model to load.")
             return
 
     if not whisper_model:
@@ -286,7 +293,8 @@ async def start_pipeline(ctx, duration_minutes: int = 0):
     try:
         await asyncio.to_thread(ready_event.wait, timeout=60.0)
     except asyncio.TimeoutError:
-         await ctx.send("❌ **Pipeline failed to start.** The startup process timed out. Check the console for errors with ffmpeg or stream connections.")
+         await ctx.send("❌ **Pipeline failed to start.** The startup process timed out. Check the log for errors with ffmpeg or stream connections.")
+         logger.error("Pipeline startup timed out.")
          if pipeline_instance: pipeline_instance.stop()
          if pipeline_thread: pipeline_thread.join()
          pipeline_instance, pipeline_thread = None, None
@@ -304,7 +312,7 @@ async def start_pipeline(ctx, duration_minutes: int = 0):
             station_names = ", ".join([f"`{s.name}`" for s in active_stations])
             await ctx.send(f"✅ **Pipeline Started!**\nMonitoring {len(active_stations)} station(s) {duration_text}:\n{station_names}")
     else:
-        await ctx.send(f"❌ **Pipeline failed to start.** Check the console for critical errors.")
+        await ctx.send(f"❌ **Pipeline failed to start.** Check the logs for critical errors.")
 
 
 # FIX 2: Renamed command from 'stop_pipeline' to 'stop_command' and updated help text.
@@ -339,6 +347,7 @@ async def shutdown_command(ctx):
         await stop_ctx.invoke(bot.get_command('stop'))
 
     await ctx.send("✅ Bot is shutting down. Goodbye!")
+    logger.info("Bot is shutting down via !shutdown command.")
     await bot.close()
 
 
@@ -395,7 +404,24 @@ async def status(ctx):
 
 # --- Main Execution ---
 if __name__ == "__main__":
+    # --- Initial Configuration Loading and Logging Setup ---
+    # This block REPLACES the old setup_logging() call.
+    try:
+        config_data = load_config("config.yml")
+        logging_config = config_data.get('logging')
+        if logging_config:
+            logging.config.dictConfig(logging_config)
+        else:
+            # Fallback if logging config is missing from YAML
+            logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+            logger.warning("Logging configuration not found in config.yml. Using basic fallback.")
+    except Exception as e:
+        # If config or logging fails, we must use print and exit.
+        print(f"CRITICAL: Failed to load configuration or set up logging: {e}", file=sys.stderr)
+        sys.exit(1)
+
     if not TOKEN or not CHANNEL_ID:
-        print("❌ CRITICAL: DISCORD_BOT_TOKEN and/or DISCORD_COMMAND_CHANNEL_ID not found in .env file.")
+        logger.critical("DISCORD_BOT_TOKEN and/or DISCORD_COMMAND_CHANNEL_ID not found in .env file.")
     else:
+        logger.info("Configuration and logging initialized successfully. Starting bot...")
         bot.run(TOKEN)

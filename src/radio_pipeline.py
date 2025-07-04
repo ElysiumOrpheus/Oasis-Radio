@@ -7,7 +7,12 @@ import re
 import yaml
 import sys
 import asyncio
-from typing import Dict, Any, List, Optional, TypeAlias
+from typing import Dict, Any, List, Optional
+import logging
+import logging.config
+
+# --- Logging Setup ---
+logger = logging.getLogger(__name__)
 
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -25,10 +30,10 @@ def load_config(path: str = "config.yml") -> Dict[str, Any]:
         with open(path, 'r', encoding='utf-8') as f:
             return yaml.safe_load(f)
     except FileNotFoundError:
-        print(f"❌ CRITICAL: Configuration file not found at '{path}'.")
+        logger.critical(f"Configuration file not found at '{path}'.")
         sys.exit(1)
     except yaml.YAMLError as e:
-        print(f"❌ CRITICAL: Error parsing the YAML configuration file: {e}")
+        logger.critical(f"Error parsing the YAML configuration file: {e}", exc_info=True)
         sys.exit(1)
 
 class DiscordBotNotifier:
@@ -42,7 +47,7 @@ class DiscordBotNotifier:
     def send(self, message: str, pings: List[str] = []) -> None:
         """Sends a message to the pre-configured Discord channel."""
         if not self.channel or not self.loop.is_running():
-            print(f"⚠️ Notifier: Cannot find channel or event loop is not running. Message not sent: {message}")
+            logger.warning(f"Notifier: Cannot find channel or event loop is not running. Message not sent: {message}")
             return
 
         ping_str = " ".join([f"<@{user_id}>" for user_id in pings])
@@ -90,7 +95,7 @@ class Station:
 
     def stop_recording(self) -> None:
         """Gracefully stops the FFmpeg recording process."""
-        print(f"[Recorder - {self.name}] Stop signal received. Attempting graceful shutdown...")
+        logger.info(f"[Recorder - {self.name}] Stop signal received. Attempting graceful shutdown...")
         self.is_running = False
         self.stop_event.set() ### <<< FIX 2: Set the event to interrupt any waiting threads (like in the retry delay)
         if self.process and self.process.poll() is None:
@@ -101,9 +106,9 @@ class Station:
                 self.process.stdin.flush()
                 self.process.terminate() # More forceful to ensure a quick stop
                 self.process.wait(timeout=5)
-                print(f"✅ [Recorder - {self.name}] FFmpeg shutdown gracefully.")
+                logger.info(f"[Recorder - {self.name}] FFmpeg shutdown gracefully.")
             except (IOError, ValueError, subprocess.TimeoutExpired) as e:
-                print(f"⚠️ [Recorder - {self.name}] Graceful shutdown failed ({e}). Killing process.")
+                logger.warning(f"[Recorder - {self.name}] Graceful shutdown failed ({e}). Killing process.")
                 self.process.kill() # Final resort
         if self.thread:
             self.thread.join()
@@ -127,14 +132,14 @@ class Station:
         attempt = 0
         while self.is_running and attempt <= retries:
             if attempt > 0:
-                print(f"⚠️ [Recorder - {self.name}] Retrying... (Attempt {attempt}/{retries}) in {retry_delay}s")
+                logger.warning(f"[Recorder - {self.name}] Retrying... (Attempt {attempt}/{retries}) in {retry_delay}s")
                 ### <<< FIX 3: Replace the blocking time.sleep() with an interruptible event.wait()
                 # This will wait for `retry_delay` seconds OR until `stop_event.set()` is called.
                 was_interrupted = self.stop_event.wait(timeout=retry_delay)
                 if was_interrupted:
                     break # Exit the loop immediately if stop was called during the delay
 
-            print(f"[Recorder - {self.name}] Starting FFmpeg process (Attempt {attempt + 1}).")
+            logger.info(f"[Recorder - {self.name}] Starting FFmpeg process (Attempt {attempt + 1}).")
 
             try:
                 self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
@@ -145,7 +150,7 @@ class Station:
                     break
 
                 if self.process.returncode == 0:
-                    print(f"✅ [Recorder - {self.name}] Recording session finished.")
+                    logger.info(f"[Recorder - {self.name}] Recording session finished.")
                     return
 
                 error_output = stderr_bytes.decode('utf-8', errors='ignore').strip()
@@ -155,28 +160,24 @@ class Station:
                         error_reason = reason
                         break
 
-                print(f"❌ [Recorder - {self.name}] FFmpeg failed. Reason: {error_reason}")
+                logger.error(f"[Recorder - {self.name}] FFmpeg failed. Reason: {error_reason}")
                 attempt += 1
 
             except Exception as e:
                 # Check if the stop event was set, which might have caused the exception (e.g., by terminating the process)
                 if self.stop_event.is_set():
-                    print(f"⏹️ [Recorder - {self.name}] Process interrupted by stop signal.")
+                    logger.info(f"[Recorder - {self.name}] Process interrupted by stop signal.")
                     break
-                print(f"❌ [Recorder - {self.name}] An unexpected error occurred: {e}")
+                logger.error(f"[Recorder - {self.name}] An unexpected error occurred: {e}", exc_info=True)
                 attempt += 1
 
         if self.is_running:
             self.has_failed_permanently = True
             final_error_message = f"🛑 **Critical Recorder Failure**\n**Station:** `{self.name}`\nThe recorder has stopped after {retries + 1} failed attempts. Check logs for details."
             self.notifier.send(final_error_message)
-            print(f"❌ [Recorder - {self.name}] All recording attempts have failed.")
+            logger.critical(f"[Recorder - {self.name}] All recording attempts have failed.")
         else:
-            print(f"[Recorder - {self.name}] Recording loop has been stopped.")
-
-
-# The rest of the file (AudioProcessor, Pipeline) remains unchanged.
-# I'm including it here for completeness.
+            logger.info(f"[Recorder - {self.name}] Recording loop has been stopped.")
 
 class AudioProcessor(FileSystemEventHandler):
     def __init__(self, model: Any, config: Dict[str, Any], notifier: DiscordBotNotifier):
@@ -202,7 +203,7 @@ class AudioProcessor(FileSystemEventHandler):
         with self.semaphore:
             sanitized_station_name = os.path.basename(os.path.dirname(audio_path))
             station_name = sanitized_station_name.replace('_', ' ')
-            print(f"--- [Processor] Processing: {os.path.basename(audio_path)} for '{station_name}' ---")
+            logger.info(f"[Processor] Processing: {os.path.basename(audio_path)} for '{station_name}'")
             transcription = self._transcribe(audio_path, station_name)
             if transcription:
                 hit_found = self._analyze(transcription, station_name, os.path.basename(audio_path))
@@ -216,17 +217,17 @@ class AudioProcessor(FileSystemEventHandler):
             text = result["text"].strip()
             transcription_path = os.path.join(self.config['paths']['transcriptions'], f"{os.path.splitext(os.path.basename(audio_path))[0]}.txt")
             with open(transcription_path, "w", encoding="utf-8") as f: f.write(text)
-            print(f"✅ [Transcriber - {station_name}] Transcription saved.")
+            logger.info(f"[Transcriber - {station_name}] Transcription saved.")
             return {"text": text, "path": transcription_path}
         except Exception as e:
-            print(f"❌ [Transcriber - {station_name}] Error: {e}")
+            logger.error(f"[Transcriber - {station_name}] Error: {e}", exc_info=True)
             return None
 
     def _analyze(self, transcription: Dict[str, str], station_name: str, audio_filename: str) -> bool:
         content_lower = transcription['text'].lower()
         for keyword in self.keywords:
             if re.search(r'\b' + re.escape(keyword) + r'\b', content_lower):
-                print(f"🚨 HIT! Keyword: '{keyword}' on Station: '{station_name}'")
+                logger.info(f"🚨 HIT! Keyword: '{keyword}' on Station: '{station_name}'")
                 hit_report = (f"--- 🚨 HIT FOUND 🚨 ---\n"
                               f"**Station:**     `{station_name}`\n"
                               f"**Keyword:**     `{keyword}`\n"
@@ -246,12 +247,12 @@ class AudioProcessor(FileSystemEventHandler):
         try:
             if transcription_path and os.path.exists(transcription_path): os.remove(transcription_path)
             if os.path.exists(audio_path): os.remove(audio_path)
-        except Exception as e: print(f"❌ [Cleaner] Error: {e}")
+        except Exception as e: logger.error(f"[Cleaner] Error: {e}", exc_info=True)
 
     def wait_for_completion(self) -> None:
-        print("[Processor] Waiting for file processing to complete...")
+        logger.info("[Processor] Waiting for file processing to complete...")
         for t in self.processing_threads: t.join()
-        print("[Processor] File processing complete.")
+        logger.info("[Processor] File processing complete.")
 
 
 class Pipeline:

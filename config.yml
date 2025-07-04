@@ -1,3 +1,28 @@
+# --- logging config ---
+logging:
+  version: 1
+  disable_existing_loggers: false
+  formatters:
+    default:
+      format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  handlers:
+    console:
+      class: logging.StreamHandler
+      level: INFO
+      formatter: default
+      stream: ext://sys.stdout
+    file:
+      class: logging.handlers.RotatingFileHandler
+      level: INFO
+      formatter: default
+      filename: radio_bot.log
+      maxBytes: 5242880 # 5 MB
+      backupCount: 3
+      encoding: utf8
+  root:
+    level: INFO
+    handlers: [console, file]
+# --- application config ---
 whisper_model: base
 recording_chunk_duration_seconds: 300
 max_concurrent_transcriptions: 2
