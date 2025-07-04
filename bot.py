@@ -286,18 +286,17 @@ class PipelineCog(commands.Cog):
         try:
             await asyncio.to_thread(ready_event.wait, timeout=60.0)
         except asyncio.TimeoutError:
-            await ctx.send("❌ **Pipeline failed to start.** Startup timed out. Check logs for ffmpeg/stream errors.")
-            logger.error("Pipeline startup timed out.")
-            if self.pipeline_instance: self.pipeline_instance.stop()
-            if self.pipeline_thread: self.pipeline_thread.join()
-            self.pipeline_instance, self.pipeline_thread = None, None
             return
+            
+        logger.info("Startup check: Pausing briefly to allow subprocesses to spin up...")
+        await asyncio.sleep(3) 
 
         if self.pipeline_instance and self.pipeline_instance.is_running():
             active_stations = self.pipeline_instance.get_active_stations()
             if not active_stations:
                 await ctx.send("✅ **Pipeline started, but failed to connect to any enabled streams.** Check logs.")
             else:
+                # ... (success message)
                 station_names = ", ".join([f"`{s.name}`" for s in active_stations])
                 await ctx.send(f"✅ **Pipeline Started!** Monitoring {len(active_stations)} station(s) {duration_text}:\n{station_names}")
         else:
@@ -358,6 +357,8 @@ class PipelineCog(commands.Cog):
                     status_lines.append(f"❓ **{name}** (Inactive/Not Started)")
                 elif live_station.has_failed_permanently:
                     status_lines.append(f"🔴 **{name}** (Failed - Check Logs)")
+                elif live_station.has_completed_successfully:
+                    status_lines.append(f"✅ **{name}** (Completed)")
                 elif live_station.is_process_active:
                     status_lines.append(f"🟢 **{name}** (Recording)")
                 else:

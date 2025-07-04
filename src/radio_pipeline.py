@@ -81,6 +81,7 @@ class Station:
         self.thread: Optional[threading.Thread] = None
         self.is_running = False
         self.has_failed_permanently = False
+        self.has_completed_successfully = False
         self.stop_event = threading.Event()
 
     def _get_dynamic_stream_url(self) -> str:
@@ -101,7 +102,8 @@ class Station:
         """Starts the FFmpeg recording process in a separate thread."""
         self.is_running = True
         self.has_failed_permanently = False
-        self.stop_event.clear() # Ensure the event is not set from a previous run
+        self.has_completed_successfully = False
+        self.stop_event.clear()
         self.thread = threading.Thread(target=self._record_loop, args=(total_duration_seconds,), daemon=True)
         self.thread.start()
 
@@ -109,21 +111,24 @@ class Station:
         """Gracefully stops the FFmpeg recording process."""
         logger.info(f"[Recorder - {self.name}] Stop signal received. Attempting graceful shutdown...")
         self.is_running = False
-        self.stop_event.set() ### <<< FIX 2: Set the event to interrupt any waiting threads (like in the retry delay)
-        if self.process and self.process.poll() is None:
+        self.stop_event.set() # This is crucial to interrupt any waits
+
+        if self.is_process_active:
+            logger.info(f"[Recorder - {self.name}] Terminating FFmpeg process...")
             try:
-                # Give ffmpeg a moment to quit via 'q', but don't wait long.
-                # The primary stop mechanism is now terminating the process.
-                self.process.stdin.write(b'q\n')
-                self.process.stdin.flush()
-                self.process.terminate() # More forceful to ensure a quick stop
+                self.process.terminate() # Ask the process to terminate
+                # Wait for a short period for it to close
                 self.process.wait(timeout=5)
-                logger.info(f"[Recorder - {self.name}] FFmpeg shutdown gracefully.")
-            except (IOError, ValueError, subprocess.TimeoutExpired) as e:
-                logger.warning(f"[Recorder - {self.name}] Graceful shutdown failed ({e}). Killing process.")
-                self.process.kill() # Final resort
-        if self.thread:
-            self.thread.join()
+                logger.info(f"[Recorder - {self.name}] FFmpeg terminated gracefully.")
+            except subprocess.TimeoutExpired:
+                logger.warning(f"[Recorder - {self.name}] FFmpeg did not terminate in time. Killing...")
+                self.process.kill() # Force kill if it doesn't respond
+                self.process.wait() # Wait for the kill to complete
+        
+        if self.thread and self.thread.is_alive():
+            self.thread.join() # Wait for the _record_loop to exit
+
+    # In src/radio_pipeline.py
 
     def _record_loop(self, total_duration_seconds: int) -> None:
         paths = self.global_config['paths']
@@ -138,87 +143,109 @@ class Station:
         loglevel = ffmpeg_config.get('loglevel', 'error')
         audio_codec = ffmpeg_config.get('codec', 'copy')
         
-        # Merge global and station-specific headers. Station headers override global ones.
         global_headers = ffmpeg_config.get('headers', {}).copy()
         station_headers = self.station_config.get('headers', {})
         final_headers = {**global_headers, **station_headers}
 
         ffmpeg_headers_str = "".join([f"{key}: {value}\r\n" for key, value in final_headers.items()])
         output_template = os.path.join(output_dir, f'{self.sanitized_name}_%Y-%m-%d_%H-%M-%S.aac')
+        
+        # --- START OF THE FIX ---
+        # is_finite_run is True if the user specified a duration like !start 10
+        is_finite_run = total_duration_seconds > 0
+        time_elapsed = 0
+        # --- END OF THE FIX ---
 
         attempt = 0
         while self.is_running and attempt <= retries:
+            # --- START OF THE FIX ---
+            # If this is a finite run, check if we're done.
+            if is_finite_run and time_elapsed >= total_duration_seconds:
+                logger.info(f"[Recorder - {self.name}] Target duration of {total_duration_seconds}s reached. Stopping recording.")
+                self.has_completed_successfully = True
+                break # Exit the while loop
+            
+            # Determine the duration for THIS SPECIFIC ffmpeg command
+            current_chunk_duration = chunk_duration
+            if is_finite_run:
+                remaining_time = total_duration_seconds - time_elapsed
+                # Use the smaller of the chunk duration or the time remaining
+                current_chunk_duration = min(chunk_duration, remaining_time)
+            # --- END OF THE FIX ---
+            
             if attempt > 0:
                 logger.warning(f"[Recorder - {self.name}] Retrying... (Attempt {attempt}/{retries}) in {retry_delay}s")
-                was_interrupted = self.stop_event.wait(timeout=retry_delay)
-                if was_interrupted:
+                if self.stop_event.wait(timeout=retry_delay):
+                    logger.info(f"[Recorder - {self.name}] Stop signal received during retry wait. Aborting.")
                     break
 
-            # Get a fresh, dynamic URL for each attempt
             dynamic_url = self._get_dynamic_stream_url()
             logger.info(f"[Recorder - {self.name}] Starting FFmpeg (Attempt {attempt + 1}). URL: {dynamic_url}")
 
-            # Build the command dynamically
+            # --- START OF THE FIX ---
+            # Use the calculated current_chunk_duration for the -t parameter
             command = ['ffmpeg', '-v', loglevel]
             if ffmpeg_headers_str:
                 command.extend(['-headers', ffmpeg_headers_str])
             command.extend([
                 '-i', dynamic_url,
-                '-t', str(total_duration_seconds),
+                '-t', str(current_chunk_duration),
                 '-f', 'segment',
-                '-segment_time', str(chunk_duration),
+                '-segment_time', str(chunk_duration), # Keep this so filenames are consistent
                 '-c:a', audio_codec,
                 '-strftime', '1',
                 output_template
             ])
+            # --- END OF THE FIX ---
 
             try:
+                # We track the start time of each chunk to manage total duration
+                chunk_start_time = time.time()
                 self.process = subprocess.Popen(
                     command,
-                    stdin=subprocess.PIPE,
+                    stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
                 )
+                _, stderr_bytes = self.process.communicate()
 
-                # Use .communicate() to get output and wait for process to finish. Prevents deadlocks.
-                stderr_bytes, _ = self.process.communicate()
-
-                # If the pipeline was stopped while ffmpeg was running, exit the loop cleanly.
                 if not self.is_running:
+                    logger.info(f"[Recorder - {self.name}] Process stopped by user command during recording.")
                     break
 
-                # --- 4. HANDLE FFMPEG EXIT CODE ---
                 if self.process.returncode == 0:
-                    logger.info(f"[Recorder - {self.name}] Recording session finished successfully.")
-                    return # Exit the entire method on success
+                    logger.info(f"[Recorder - {self.name}] Successfully recorded a segment.")
+                    # --- START OF THE FIX ---
+                    # Add the actual time this chunk ran for to our total
+                    chunk_end_time = time.time()
+                    time_elapsed += (chunk_end_time - chunk_start_time)
+                    # --- END OF THE FIX ---
+                    attempt = 0
+                    continue
 
-                # If we get here, it means ffmpeg failed.
-                error_output = stderr_bytes.decode('utf-8', errors='ignore').strip()
-                error_reason = "Unknown FFmpeg error"
-                for pattern, reason in self.FFMPEG_ERROR_PATTERNS.items():
-                    if pattern in error_output:
-                        error_reason = reason
-                        break
-                
-                logger.error(f"[Recorder - {self.name}] FFmpeg failed. Reason: {error_reason}")
-                logger.debug(f"[Recorder - {self.name}] Full FFmpeg stderr: {error_output}")
-                attempt += 1
-
+                else:
+                    error_output = stderr_bytes.decode('utf-8', errors='ignore').strip()
+                    error_reason = "Unknown FFmpeg error"
+                    for pattern, reason in self.FFMPEG_ERROR_PATTERNS.items():
+                        if pattern in error_output:
+                            error_reason = reason
+                            break
+                    logger.error(f"[Recorder - {self.name}] FFmpeg process failed. Reason: {error_reason}. Return Code: {self.process.returncode}")
+                    logger.debug(f"[Recorder - {self.name}] Full FFmpeg stderr: {error_output}")
+                    attempt += 1
             except Exception as e:
-                # Check if the exception was caused by our stop signal
                 if self.stop_event.is_set():
                     logger.info(f"[Recorder - {self.name}] Process interrupted by stop signal.")
                     break
                 logger.error(f"[Recorder - {self.name}] An unexpected error occurred in the record loop: {e}", exc_info=True)
                 attempt += 1
 
-        # --- 5. HANDLE PERMANENT FAILURE ---
         if self.is_running:
             self.has_failed_permanently = True
             final_error_message = f"🛑 **Critical Recorder Failure**\n**Station:** `{self.name}`\nThe recorder has stopped after {retries + 1} failed attempts. Check logs for details."
             self.notifier.send(final_error_message)
-            logger.critical(f"[Recorder - {self.name}] All recording attempts have failed for station.")
+            logger.critical(f"[Recorder - {self.name}] All recording attempts have failed.")
         else:
             logger.info(f"[Recorder - {self.name}] Recording loop has been stopped gracefully.")
 
@@ -247,18 +274,58 @@ class AudioProcessor(FileSystemEventHandler):
             sanitized_station_name = os.path.basename(os.path.dirname(audio_path))
             station_name = sanitized_station_name.replace('_', ' ')
             logger.info(f"[Processor] Processing: {os.path.basename(audio_path)} for '{station_name}'")
+            
             transcription = self._transcribe(audio_path, station_name)
-            if transcription:
-                hit_found = self._analyze(transcription, station_name, os.path.basename(audio_path))
-                if not hit_found: self._cleanup(audio_path, transcription['path'])
-            else:
+            if not transcription:
+                # If transcription fails, just clean up the audio
                 self._cleanup(audio_path)
+                return
+
+            # This call is now compatible with the new _analyze method
+            found_keyword = self._analyze(transcription)
+
+            if found_keyword:
+                # HIT FOUND: Notify with ping, save files
+                logger.info(f"🚨 HIT! Keyword: '{found_keyword}' on Station: '{station_name}'")
+                hit_report = (f"--- 🚨 HIT FOUND 🚨 ---\n"
+                              f"**Station:**     `{station_name}`\n"
+                              f"**Keyword:**     `{found_keyword}`\n"
+                              f"**Source File:** `{os.path.basename(audio_path)}`\n"
+                              f"**Full Text:**   \n```\n{transcription['text']}\n```"
+                              f"-----------------")
+                
+                user_ids_str = os.getenv("DISCORD_USER_IDS_TO_PING", "")
+                pings = [uid.strip() for uid in user_ids_str.split(',') if uid.strip()]
+                self.notifier.send(hit_report, pings)
+                
+                # Write to the main hits file
+                with self.write_lock:
+                    with open(self.config['paths']['hits_file'], 'a', encoding='utf-8') as hits_f:
+                        hits_f.write(hit_report.replace("`", "") + "\n\n")
+                
+                # Files are intentionally NOT cleaned up
+                logger.info(f"[Processor] Hit found. Preserving '{os.path.basename(audio_path)}' and its transcription.")
+
+            else:
+                # NO HIT: Notify without ping, delete files
+                logger.info(f"[Processor] No keywords found in: {os.path.basename(audio_path)}")
+                no_hit_report = (f"✅ **Analysis Complete (No Hit)**\n"
+                                 f"**Station:** `{station_name}`\n"
+                                 f"**Source File:** `{os.path.basename(audio_path)}`\n"
+                                 f"*(Audio and transcription files have been deleted)*")
+                
+                self.notifier.send(no_hit_report, pings=[])
+                # The single, correct cleanup call
+                self._cleanup(audio_path, transcription['path'])
 
     def _transcribe(self, audio_path: str, station_name: str) -> Optional[Dict[str, str]]:
         try:
             result = self.model.transcribe(audio_path, fp16=False)
             text = result["text"].strip()
-            transcription_path = os.path.join(self.config['paths']['transcriptions'], f"{os.path.splitext(os.path.basename(audio_path))[0]}.txt")
+            # Ensure transcription directory exists to prevent errors
+            transcription_dir = self.config['paths']['transcriptions']
+            os.makedirs(transcription_dir, exist_ok=True)
+            transcription_path = os.path.join(transcription_dir, f"{os.path.splitext(os.path.basename(audio_path))[0]}.txt")
             with open(transcription_path, "w", encoding="utf-8") as f: f.write(text)
             logger.info(f"[Transcriber - {station_name}] Transcription saved.")
             return {"text": text, "path": transcription_path}
@@ -266,25 +333,17 @@ class AudioProcessor(FileSystemEventHandler):
             logger.error(f"[Transcriber - {station_name}] Error: {e}", exc_info=True)
             return None
 
-    def _analyze(self, transcription: Dict[str, str], station_name: str, audio_filename: str) -> bool:
+    def _analyze(self, transcription: Dict[str, str]) -> Optional[str]:
+        """
+        Analyzes transcription text for keywords.
+        Returns the first keyword found as a string, or None if no keywords are found.
+        """
         content_lower = transcription['text'].lower()
         for keyword in self.keywords:
+            # Use word boundaries to avoid partial matches (e.g., 'give' in 'forgive')
             if re.search(r'\b' + re.escape(keyword) + r'\b', content_lower):
-                logger.info(f"🚨 HIT! Keyword: '{keyword}' on Station: '{station_name}'")
-                hit_report = (f"--- 🚨 HIT FOUND 🚨 ---\n"
-                              f"**Station:**     `{station_name}`\n"
-                              f"**Keyword:**     `{keyword}`\n"
-                              f"**Source File:** `{audio_filename}`\n"
-                              f"**Full Text:**   \n```\n{transcription['text']}\n```"
-                              f"-----------------")
-                user_ids_str = os.getenv("DISCORD_USER_IDS_TO_PING", "")
-                pings = [uid.strip() for uid in user_ids_str.split(',') if uid.strip()]
-                self.notifier.send(hit_report, pings)
-                with self.write_lock:
-                    with open(self.config['paths']['hits_file'], 'a', encoding='utf-8') as hits_f:
-                        hits_f.write(hit_report.replace("`", "") + "\n\n")
-                return True
-        return False
+                return keyword # Return the specific keyword that was matched
+        return None
 
     def _cleanup(self, audio_path: str, transcription_path: Optional[str] = None) -> None:
         try:

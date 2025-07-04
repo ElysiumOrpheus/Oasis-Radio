@@ -1,10 +1,9 @@
-# --- logging config ---
 logging:
   version: 1
   disable_existing_loggers: false
   formatters:
     default:
-      format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+      format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
   handlers:
     console:
       class: logging.StreamHandler
@@ -16,22 +15,20 @@ logging:
       level: INFO
       formatter: default
       filename: radio_bot.log
-      maxBytes: 5242880 # 5 MB
+      maxBytes: 5242880
       backupCount: 3
       encoding: utf8
   root:
     level: INFO
-    handlers: [console, file]
-
-# --- fmpeg config ---
+    handlers:
+    - console
+    - file
 ffmpeg_settings:
-  loglevel: error # Verbosity level for ffmpeg (e.g., quiet, error, warning, info, debug)
-  codec: copy # Audio codec. 'copy' is efficient as it doesn't re-encode. Use 'aac' to re-encode if needed.
+  loglevel: error
+  codec: copy
   headers:
-    # These are global headers applied to ALL stations unless overridden below.
-    User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36
-
-# --- application config ---
+    User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
+      like Gecko) Chrome/138.0.0.0 Safari/537.36
 whisper_model: base
 recording_chunk_duration_seconds: 300
 max_concurrent_transcriptions: 2
@@ -41,16 +38,12 @@ paths:
   recordings: ./audio_to_process
   transcriptions: ./transcriptions
   hits_file: ./CONTEST_HITS.txt
-
-# --- radio station config ---
 radio_stations:
 - name: 104.5 Fresh Radio (Cornwall)
-  # NEW: Using a placeholder for the dynamic timestamp.
-  stream_url: "https://corus.leanstream.co/CFLGFM?args=web_01&startTime={timestamp}"
+  stream_url: https://corus.leanstream.co/CFLGFM?args=web_01&startTime={timestamp}
 - name: Boom 97.3 (Toronto)
   stream_url: https://corus.leanstream.co/CIUXFM_HIGH?args=web_01
-  enabled: true
-  # NEW: Example of per-station headers. This Referer will ONLY be used for Boom 97.3.
+  enabled: false
   headers:
     Referer: https://boom973.com/
 - name: 98.1 CHFI (Toronto)
@@ -66,8 +59,6 @@ radio_stations:
   enabled: false
   headers:
     Referer: https://www.iheartradio.ca/virginradio/toronto
-
-# --- keyword config ---
 keywords:
 - contest
 - giveaway
