@@ -1,0 +1,63 @@
+whisper_model: base
+recording_chunk_duration_seconds: 300
+max_concurrent_transcriptions: 2
+recording_retries: 3
+recording_retry_delay_seconds: 60
+paths:
+  recordings: ./audio_to_process
+  transcriptions: ./transcriptions
+  hits_file: ./CONTEST_HITS.txt
+radio_stations:
+- name: 104.5 Fresh Radio (Cornwall)
+  stream_url: https://corus.leanstream.co/CFLGFM?args=web_01
+- name: 98.1 CHFI (Toronto)
+  stream_url: https://rogers.leanstream.co/CHFI-FM
+  enabled: false
+- name: Z103.5 (Toronto)
+  stream_url: http://ice10.securenetsystems.net/CIDC
+  enabled: false
+- name: Virgin Radio 99.9 (Toronto)
+  stream_url: https://live.leanstream.co/CFTR-FM
+  enabled: false
+- name: Boom 97.3 (Toronto)
+  stream_url: https://corus.leanstream.co/CIUXFM_HIGH?args=web_01
+  enabled: false
+keywords:
+- contest
+- giveaway
+- raffle
+- sweepstakes
+- grand prize
+- chance to win
+- prize
+- win
+- winner
+- won
+- claim
+- free
+- cash
+- money
+- tickets
+- backstage pass
+- trip
+- vacation
+- gift card
+- call now
+- caller number
+- call in
+- text to
+- text the keyword
+- keyword
+- cue to call
+- secret sound
+- website
+- .com
+- .ca
+- dot com
+- dot ca
+- visit our website
+- enter online
+- app
+- facebook
+- instagram
+- twitter

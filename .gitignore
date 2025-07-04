@@ -1,0 +1,38 @@
+# --- Environment & Secrets ---
+# Ignore the .env file containing secrets!
+.env
+
+# --- Virtual Environment ---
+# Ignore the virtual environment folder
+venv/
+.venv/
+env/
+
+# --- Python Cache ---
+# Ignore Python's cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- IDE & OS specific files ---
+# Ignore common IDE and OS files that don't belong in the repo
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# --- Data & Log Folders ---
+# Ignore folders that will contain generated data.
+# We'll add a placeholder file to them later if needed.
+audio_to_process/
+transcriptions/
+
+# --- Temporary Files ---
+# Ignore any temporary files like your temp.txt
+temp.txt
+*.log
+
+# --- Build & Distribution ---
+/dist/
+/build/
+*.egg-info/
