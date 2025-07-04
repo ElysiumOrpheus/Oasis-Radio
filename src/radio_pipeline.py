@@ -68,17 +68,29 @@ class Station:
         "Connection refused": "Connection refused by server",
     }
 
-    def __init__(self, name: str, stream_url: str, config: Dict[str, Any], notifier: DiscordBotNotifier):
-        self.name = name
-        self.stream_url = stream_url
-        self.config = config
+    def __init__(self, station_config: Dict[str, Any], global_config: Dict[str, Any], notifier: DiscordBotNotifier):
+        self.station_config = station_config
+        self.global_config = global_config
         self.notifier = notifier
+        
+        self.name = self.station_config['name']
+        self.stream_url_template = self.station_config['stream_url'] # It's a template now
         self.sanitized_name = re.sub(r'[^\w\.-]', '_', self.name)
+        
         self.process: Optional[subprocess.Popen] = None
         self.thread: Optional[threading.Thread] = None
         self.is_running = False
         self.has_failed_permanently = False
-        self.stop_event = threading.Event() ### <<< FIX 1: Add a threading.Event for interruptible waits
+        self.stop_event = threading.Event()
+
+    def _get_dynamic_stream_url(self) -> str:
+        """Replaces placeholders in the stream URL template."""
+        url = self.stream_url_template
+        # Replace {timestamp} with the current Unix timestamp
+        if '{timestamp}' in url:
+            url = url.replace('{timestamp}', str(int(time.time())))
+        # Add more placeholder replacements here if needed in the future
+        return url
 
     @property
     def is_process_active(self) -> bool:
@@ -114,55 +126,53 @@ class Station:
             self.thread.join()
 
     def _record_loop(self, total_duration_seconds: int) -> None:
-        # --- 1. SETUP PARAMETERS ---
-        paths = self.config['paths']
-        retries = self.config.get('recording_retries', 3)
-        retry_delay = self.config.get('recording_retry_delay_seconds', 60)
-        chunk_duration = self.config['recording_chunk_duration_seconds']
+        paths = self.global_config['paths']
+        retries = self.global_config.get('recording_retries', 3)
+        retry_delay = self.global_config.get('recording_retry_delay_seconds', 60)
+        chunk_duration = self.global_config['recording_chunk_duration_seconds']
 
         output_dir = os.path.join(paths['recordings'], self.sanitized_name)
         os.makedirs(output_dir, exist_ok=True)
 
-        # --- 2. DYNAMICALLY BUILD THE FFMPEG COMMAND ---
-        ffmpeg_config = self.config.get('ffmpeg_settings', {})
+        ffmpeg_config = self.global_config.get('ffmpeg_settings', {})
         loglevel = ffmpeg_config.get('loglevel', 'error')
         audio_codec = ffmpeg_config.get('codec', 'copy')
-        headers_dict = ffmpeg_config.get('headers', {})
+        
+        # Merge global and station-specific headers. Station headers override global ones.
+        global_headers = ffmpeg_config.get('headers', {}).copy()
+        station_headers = self.station_config.get('headers', {})
+        final_headers = {**global_headers, **station_headers}
 
-        ffmpeg_headers = "".join([f"{key}: {value}\r\n" for key, value in headers_dict.items()])
+        ffmpeg_headers_str = "".join([f"{key}: {value}\r\n" for key, value in final_headers.items()])
         output_template = os.path.join(output_dir, f'{self.sanitized_name}_%Y-%m-%d_%H-%M-%S.aac')
 
-        # Base command
-        command = ['ffmpeg', '-v', loglevel]
-
-        # Add headers only if they are defined
-        if ffmpeg_headers:
-            command.extend(['-headers', ffmpeg_headers])
-
-        # Add the rest of the arguments
-        command.extend([
-            '-i', self.stream_url,
-            '-t', str(total_duration_seconds),
-            '-f', 'segment',
-            '-segment_time', str(chunk_duration),
-            '-c:a', audio_codec,
-            '-strftime', '1',
-            output_template
-        ])
-
-        # --- 3. MAIN RECORDING LOOP WITH RETRIES ---
         attempt = 0
         while self.is_running and attempt <= retries:
             if attempt > 0:
                 logger.warning(f"[Recorder - {self.name}] Retrying... (Attempt {attempt}/{retries}) in {retry_delay}s")
                 was_interrupted = self.stop_event.wait(timeout=retry_delay)
                 if was_interrupted:
-                    break  # Exit loop immediately if stop was called during the delay
+                    break
 
-            logger.info(f"[Recorder - {self.name}] Starting FFmpeg process (Attempt {attempt + 1}).")
+            # Get a fresh, dynamic URL for each attempt
+            dynamic_url = self._get_dynamic_stream_url()
+            logger.info(f"[Recorder - {self.name}] Starting FFmpeg (Attempt {attempt + 1}). URL: {dynamic_url}")
+
+            # Build the command dynamically
+            command = ['ffmpeg', '-v', loglevel]
+            if ffmpeg_headers_str:
+                command.extend(['-headers', ffmpeg_headers_str])
+            command.extend([
+                '-i', dynamic_url,
+                '-t', str(total_duration_seconds),
+                '-f', 'segment',
+                '-segment_time', str(chunk_duration),
+                '-c:a', audio_codec,
+                '-strftime', '1',
+                output_template
+            ])
 
             try:
-                # Run the FFmpeg process
                 self.process = subprocess.Popen(
                     command,
                     stdin=subprocess.PIPE,
@@ -170,6 +180,7 @@ class Station:
                     stderr=subprocess.PIPE,
                     creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
                 )
+
                 # Use .communicate() to get output and wait for process to finish. Prevents deadlocks.
                 stderr_bytes, _ = self.process.communicate()
 
@@ -367,7 +378,7 @@ class Pipeline:
             print(f"\n--- Starting Recorders for {len(enabled_stations_config)} Enabled Station(s) ---")
             for station_config in enabled_stations_config:
                 print(f"[Pipeline] Initializing: {station_config['name']}")
-                station = Station(station_config['name'], station_config['stream_url'], self.config, self.notifier)
+                station = Station(station_config=station_config, global_config=self.config, notifier=self.notifier)
                 self.stations.append(station)
                 station.start_recording(total_seconds)
 
