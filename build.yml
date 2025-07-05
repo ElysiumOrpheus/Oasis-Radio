@@ -1,0 +1,31 @@
+# -----------------------------------------------------------------------------
+#               M A K E R  |  By ElysiumOrpheus
+# -----------------------------------------------------------------------------
+# This file tells your universal build.py script how to handle this project.
+# -----------------------------------------------------------------------------
+
+# --- Core Project Settings ---
+project_name: RadioBot
+entry_point: bot.py
+requirements_file: requirements.txt
+output_dir: dist
+
+# --- PyInstaller Settings ---
+pyinstaller:
+  one_file: false
+  no_console: true
+
+  data_files:
+    - { 'config.yml': '.' }
+    - { '.env': '.' }
+    - { 'src/': 'src/' } 
+
+  hidden_imports:
+    - 'nacl.secret'
+    - 'whisper.model'
+    - 'whisper.audio'
+    - 'logging.config'
+
+archive:
+  name: RadioBot_v1.0_Windows
+  format: zip
