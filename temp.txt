@@ -1,8 +1,0 @@
-done - status shows its connecting/retrying sometimes but in reality the log says the recording session just finished
-done - i want it to only delete the transcriptions and audio if thers no hit. i want it to send a message with the bot if thers not a hit or if theres a hit. but only pinging if there is a hit.
-commands sent to discord bot during whisper model loadin are very slow
-log says failed "2025-07-04 13:19:52,758 - src.radio_pipeline - INFO - [Recorder - 104.5 Fresh Radio (Cornwall)] Starting FFmpeg (Attempt 1). URL: https://corus.leanstream.co/CFLGFM?args=web_01&startTime=1751649592" but in !status bot says its recording
-up time and clip are glitched
-stream ending prematurely - most likely because under 1m
-
-transcription and stopping fixes

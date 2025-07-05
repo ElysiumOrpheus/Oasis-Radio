@@ -37,6 +37,8 @@ async def load_bot_config():
     async with CONFIG_LOCK:
         try:
             with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+                #new log
+                logger.debug("Bot config loaded from disk.")
                 return yaml.safe_load(f)
         except (FileNotFoundError, yaml.YAMLError) as e:
             logger.error(f"Bot config loader error: {e}")
@@ -48,6 +50,8 @@ async def save_bot_config(data):
         try:
             with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
                 yaml.dump(data, f, default_flow_style=False, sort_keys=False, indent=2)
+                #new log
+                logger.info(f"Bot config saved to disk.")
             return True
         except IOError as e:
             logger.error(f"Bot config save error: {e}")
@@ -82,7 +86,12 @@ class StationConfigView(ui.View):
 
     async def button_callback(self, interaction: discord.Interaction):
         """The single callback handler for all dynamically created buttons."""
+        station_name_to_toggle = interaction.data["custom_id"].replace("toggle_station_", "")
+        #new log
+        logger.info(f"User '{interaction.user}' clicked config button for station '{station_name_to_toggle}'.")
         if self.cog.pipeline_instance and self.cog.pipeline_instance.is_running():
+            #new log
+            logger.warning(f"User '{interaction.user}' tried to change config while pipeline is running.")
             await interaction.response.send_message(
                 "⚠️ **Action failed.** Please stop the pipeline with `!stop` before changing the configuration.",
                 ephemeral=True
@@ -105,6 +114,8 @@ class StationConfigView(ui.View):
                 current_status = station.get('enabled', True)
                 station['enabled'] = not current_status
                 station_found = True
+                #new log
+                logger.info(f"Toggled station '{station_name_to_toggle}' enabled status to {not current_status}.")
                 break
 
         if not station_found:
@@ -119,6 +130,8 @@ class StationConfigView(ui.View):
         new_embed = self.cog._create_station_embed(stations)
         new_view = StationConfigView(stations, self.cog)
         await interaction.edit_original_response(embed=new_embed, view=new_view)
+        #new log
+        logger.debug(f"Config view updated successfully after toggle.")
 
 # --- UPDATED Custom Help Command ---
 class CustomHelpCommand(commands.HelpCommand):
@@ -130,6 +143,8 @@ class CustomHelpCommand(commands.HelpCommand):
 
     async def send_bot_help(self, mapping):
         """Handles the main `!help` command."""
+        #new log
+        logger.debug(f"Help command invoked by '{self.context.author}'.")
         embed = discord.Embed(
             title="Bot Command Help",
             description="Here are the available commands:",
@@ -151,6 +166,8 @@ class CustomHelpCommand(commands.HelpCommand):
 
     async def send_command_help(self, command):
         """Handles `!help <command>`."""
+        #new log
+        logger.debug(f"Help command invoked for command '{command.name}' by '{self.context.author}'.")
         embed = discord.Embed(title=f"Help for `!{command.name}`", color=discord.Color.dark_teal())
         embed.add_field(name="Usage", value=self.get_command_signature(command), inline=False)
         embed.add_field(name="Description", value=command.help or "No description provided.", inline=False)
@@ -162,6 +179,8 @@ class CustomHelpCommand(commands.HelpCommand):
 
     async def send_error_message(self, error):
         """Handles errors, like a command not being found."""
+        #new log
+        logger.warning(f"Help command error: {error}")
         await self.get_destination().send(f"❌ {error}")
 
 # --- pipeline cog ---
@@ -204,11 +223,15 @@ class PipelineCog(commands.Cog):
                 logger.critical("'whisper_model' not specified in config.yml for pre-loading.")
                 return
 
+            #new log
+            logger.info(f"Pre-loading model '{model_name}' in a background thread.")
             import whisper
             self.whisper_model = await asyncio.to_thread(whisper.load_model, model_name)
 
             logger.info(f"Whisper model '{model_name}' pre-loaded successfully.")
             self.model_ready_event.set()
+            #new log
+            logger.info("Model ready event has been set.")
         except Exception as e:
             logger.critical(f"Failed to pre-load Whisper model: {e}", exc_info=True)
 
@@ -236,6 +259,8 @@ class PipelineCog(commands.Cog):
     # --- Bot Commands ---
     @commands.command(name="config", help="Shows an interactive menu to enable/disable stations.\nMust be used when the pipeline is stopped.")
     async def config(self, ctx: commands.Context):
+        #new log
+        logger.info(f"Command '!config' invoked by '{ctx.author}'.")
         if self.pipeline_instance and self.pipeline_instance.is_running():
             await ctx.send("⚠️ Please stop the pipeline with `!stop` before changing the configuration.")
             return
@@ -248,14 +273,22 @@ class PipelineCog(commands.Cog):
 
     @commands.command(name="start", help="Starts the radio monitoring pipeline. Usage: !start [duration_in_minutes]")
     async def start(self, ctx: commands.Context, duration_minutes: int = 0):
+        #new log
+        logger.info(f"Command '!start' invoked by '{ctx.author}' with duration {duration_minutes} mins.")
         if self.pipeline_instance:
+            #new log
+            logger.warning(f"User '{ctx.author}' tried to start an already running pipeline.")
             await ctx.send("⚠️ The pipeline is already running.")
             return
 
         if not self.model_ready_event.is_set():
+            #new log
+            logger.info("Whisper model not ready, waiting for event...")
             await ctx.message.add_reaction("⏳")
             try:
                 await asyncio.wait_for(self.model_ready_event.wait(), timeout=180.0)
+                #new log
+                logger.info("Model ready event received.")
                 await ctx.message.remove_reaction("⏳", self.bot.user)
             except asyncio.TimeoutError:
                 await ctx.message.remove_reaction("⏳", self.bot.user)
@@ -277,6 +310,8 @@ class PipelineCog(commands.Cog):
 
         await ctx.send(f"🚀 **Starting Pipeline {duration_text}...**\n\n{station_info}\n\n*Please wait...*")
 
+        #new log
+        logger.info("Creating and starting pipeline thread.")
         ready_event = threading.Event()
         notifier = DiscordBotNotifier(self.bot, CHANNEL_ID)
         self.pipeline_instance = Pipeline(config_path="config.yml", notifier=notifier, model=self.whisper_model)
@@ -284,8 +319,16 @@ class PipelineCog(commands.Cog):
         self.pipeline_thread.start()
 
         try:
+            #new log
+            logger.info("Waiting for pipeline ready_event from thread.")
             await asyncio.to_thread(ready_event.wait, timeout=60.0)
+            #new log
+            logger.info("Pipeline ready_event received.")
         except asyncio.TimeoutError:
+            #new log
+            logger.error("Timeout waiting for pipeline to signal it is ready.")
+            #new log
+            await ctx.send("❌ **Pipeline failed to confirm startup in time.** Check logs for errors.")
             return
             
         logger.info("Startup check: Pausing briefly to allow subprocesses to spin up...")
@@ -294,30 +337,50 @@ class PipelineCog(commands.Cog):
         if self.pipeline_instance and self.pipeline_instance.is_running():
             active_stations = self.pipeline_instance.get_active_stations()
             if not active_stations:
+                #new log
+                logger.warning("Pipeline started, but no active station streams were detected.")
                 await ctx.send("✅ **Pipeline started, but failed to connect to any enabled streams.** Check logs.")
             else:
                 # ... (success message)
                 station_names = ", ".join([f"`{s.name}`" for s in active_stations])
+                #new log
+                logger.info(f"Pipeline started successfully, monitoring: {station_names}")
                 await ctx.send(f"✅ **Pipeline Started!** Monitoring {len(active_stations)} station(s) {duration_text}:\n{station_names}")
         else:
+            #new log
+            logger.critical("Pipeline thread finished, but the pipeline is not in a running state. Startup failed.")
             await ctx.send(f"❌ **Pipeline failed to start.** Check logs for critical errors.")
 
     @commands.command(name="stop", help="Stops the pipeline gracefully.")
     async def stop(self, ctx: commands.Context):
+        #new log
+        logger.info(f"Command '!stop' invoked by '{ctx.author}'.")
         if not self.pipeline_instance or not self.pipeline_instance.is_running():
+            #new log
+            logger.warning(f"User '{ctx.author}' tried to stop a non-running pipeline.")
             await ctx.send("⚠️ The pipeline is not currently running.")
             return
 
         await ctx.send("🛑 **Stopping station scanning...** Waiting for processes to finish.")
+        #new log
+        logger.info("Calling pipeline stop method...")
         await asyncio.to_thread(self.pipeline_instance.stop)
         if self.pipeline_thread:
+            #new log
+            logger.info("Waiting for pipeline thread to join...")
             await asyncio.to_thread(self.pipeline_thread.join)
+            #new log
+            logger.info("Pipeline thread has joined.")
 
         self.pipeline_instance, self.pipeline_thread = None, None
         await ctx.send("✅ **Pipeline stopped successfully.**")
+        #new log
+        logger.info("Pipeline has been fully stopped and instance cleared.")
 
     @commands.command(name="shutdown", help="Stops the pipeline and shuts down the bot.")
     async def shutdown(self, ctx: commands.Context):
+        #new log
+        logger.info(f"Command '!shutdown' invoked by '{ctx.author}'. Bot is shutting down.")
         await ctx.send("🛑 **Initiating full bot shutdown...**")
         if self.pipeline_instance and self.pipeline_instance.is_running():
             await ctx.send("↳ Stopping active pipeline first...")
@@ -329,6 +392,8 @@ class PipelineCog(commands.Cog):
 
     @commands.command(name="status", help="Shows the real-time status of the pipeline.")
     async def status(self, ctx: commands.Context):
+        #new log
+        logger.info(f"Command '!status' invoked by '{ctx.author}'.")
         if not self.pipeline_instance or not self.pipeline_instance.is_running():
             await ctx.send("ℹ️ The pipeline is currently stopped.")
             return
@@ -368,15 +433,21 @@ class PipelineCog(commands.Cog):
                         value="\n".join(status_lines) or "No stations found.",
                         inline=False)
         await ctx.send(embed=embed)
+        #new log
+        logger.debug("Status command successfully executed and sent.")
 
 # --- Main Execution ---
 async def main():
     """The main async function to setup and run the bot."""
+    #new log
+    print("Application starting...")
     try:
         config_data = load_config("config.yml")
         logging_config = config_data.get('logging')
         if logging_config:
             logging.config.dictConfig(logging_config)
+            #new log
+            print("Logging configured from 'config.yml'.")
         else:
             logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
             logger.warning("Logging configuration not found in config.yml. Using basic fallback.")
@@ -390,6 +461,8 @@ async def main():
 
     bot.help_command = CustomHelpCommand()
     await bot.add_cog(PipelineCog(bot))
+    #new log
+    logger.info("Bot cogs and help command have been initialized.")
 
     logger.info("Configuration and logging initialized. Starting bot...")
     await bot.start(TOKEN)
